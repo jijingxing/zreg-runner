@@ -408,6 +408,9 @@ def one_round(trial):
                 push_collector('dbg', f'hole-L{LANE_ID or 0}', {
                     'bg': st['bg']['src'][:300000], 'pc': pcu[:300000], 'hx': float(hx), 'x0': int(x0),
                     'bg_rect': st['bg'], 'slider': st.get('slider'),
+                    'html': (R.ev("""(()=>{const e=document.querySelector('#aliyunCaptcha-window-popup')||document.querySelector('#aliyunCaptcha-window-embed')||document.querySelector('#aliyunCaptcha-captcha-body');return e?e.outerHTML.replace(/src="data:[^"]{200,}"/g,'src="data:…"').slice(0,7000):'no-container'})()""") or ''),
+                    'els': (R.ev("""(()=>[...document.querySelectorAll('[id^=aliyunCaptcha],canvas')].map(e=>{const r=e.getBoundingClientRect();return e.tagName+'#'+e.id+'.'+String(e.className).slice(0,30)+' @'+Math.round(r.x)+','+Math.round(r.y)+' '+Math.round(r.width)+'x'+Math.round(r.height)}))()""") or []),
+                    'shot': _shot(st),
                     'dom': R.ev("""(()=>{const o={};for(const id of ['aliyunCaptcha-window-popup','aliyunCaptcha-window-embed','aliyunCaptcha-img','aliyunCaptcha-puzzle','aliyunCaptcha-sliding-slider','aliyunCaptcha-captcha-body']){const e=document.getElementById(id);if(!e){o[id]='absent';continue}const r=e.getBoundingClientRect();const cs=getComputedStyle(e);o[id]=[Math.round(r.x),Math.round(r.y),Math.round(r.width),Math.round(r.height),cs.display,cs.visibility,cs.opacity].join('|')}return o})()"""),
                     'puzzle_rect': R.ev("(()=>{const p=document.querySelector('#aliyunCaptcha-puzzle');if(!p)return null;const r=p.getBoundingClientRect();return {x:r.x,y:r.y,w:r.width,h:r.height,nw:p.naturalWidth,nh:p.naturalHeight,complete:p.complete}})()")})
             except Exception as e:
@@ -701,6 +704,19 @@ def _claim_show_widget():
     time.sleep(5)
     R.ev("""(()=>{const w=document.getElementById('aliyunCaptcha-window-embed');if(w){w.style.display='block';w.classList.add('aliyunCaptcha-show');}return 1})()""")
     time.sleep(0.8)
+
+
+def _shot(st, pad=30, above=50, below=70):
+    """题目区域截图（base64 PNG），失败返回空串。"""
+    try:
+        b = st.get('bg') or {}
+        rq = urllib.request.Request(f'http://127.0.0.1:{DRAGD_PORT}/shot',
+            data=json.dumps({'x': max(0, b.get('x', 0) - pad), 'y': max(0, b.get('y', 0) - above),
+                             'w': b.get('w', 300) + 2 * pad, 'h': b.get('w', 300) + above + below}).encode(),
+            headers={'Content-Type': 'application/json'})
+        return json.loads(_NO_PROXY_OPENER.open(rq, timeout=30).read()).get('data', '')
+    except Exception:
+        return ''
 
 
 def _claim_diag():
