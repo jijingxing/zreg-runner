@@ -386,6 +386,14 @@ def one_round(trial):
         if not (6 <= off <= st['bg']['w'] - 6):
             # 洞检测给出越界值（实测出现过 err=-571px）：这种图 CV 失效，拖了也是白拖 → 换题
             log(f'hole out of range ({off:.0f}/{st["bg"]["w"]:.0f}) → refresh challenge')
+            try:   # 现场留存：把这道题的背景/拼图原图送 collector，VPS 侧离线复算
+                pcu = R.ev("(document.querySelector('#aliyunCaptcha-puzzle')||{src:''}).src") or ''
+                push_collector('dbg', f'hole-L{LANE_ID or 0}', {
+                    'bg': st['bg']['src'][:300000], 'pc': pcu[:300000], 'hx': hx, 'x0': x0,
+                    'bg_rect': st['bg'], 'slider': st.get('slider'),
+                    'puzzle_rect': R.ev("(()=>{const p=document.querySelector('#aliyunCaptcha-puzzle');if(!p)return null;const r=p.getBoundingClientRect();return {x:r.x,y:r.y,w:r.width,h:r.height,nw:p.naturalWidth,nh:p.naturalHeight,complete:p.complete}})()")})
+            except Exception as e:
+                log(f'dbg push fail {repr(e)[:40]}')
             R.ev("""(()=>{const b=document.querySelector('#aliyunCaptcha-captcha-body button')||document.querySelector('#aliyunCaptcha-refreshIcon')||document.querySelector('.aliyunCaptcha-refresh');if(b)b.click();return 1})()""")
             time.sleep(2.5 + random.random() * 1.5)
             continue
