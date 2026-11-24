@@ -365,9 +365,17 @@ def one_round(trial):
     R.ev("""(()=>{const b=[...document.querySelectorAll("a,button")].find(b=>{const t=(b.textContent||'').trim();return /(sign\s*up|注册)/i.test(t)&&!/google|github|apple|wechat/i.test(t)});if(b){b.click();return 1}return 0})()""")
     wait_for(lambda: R.ev('!!document.querySelector("form input[name=new-password], form input[type=password]")', 6) is True, 10, 0.3)
     email = R.open_challenge()
-    _pwlen = R.ev("""(()=>{const e=document.querySelector('form input[name="new-password"]')||document.querySelector('form input[type="password"]');return e?(e.value||'').length:-1})()""")
-    if _pwlen != len(PW):
-        log(f'WARN password field not filled (len={_pwlen}, want {len(PW)}) → form inputs: ' + str(R.ev("""(()=>[...document.querySelectorAll('form input')].map(e=>(e.name||'-')+'/'+(e.type||'-')+'/'+(e.autocomplete||'-')+'/'+(e.placeholder||'').slice(0,18)))()""")))
+    # 密码框必须回读校验：React 重渲染可能换掉节点（11-24 实测填完即丢），最多重填 4 次
+    _pw_ok = False
+    for _try in range(4):
+        _pwlen = R.ev("""(()=>{const e=document.querySelector('form input[name="new-password"]')||document.querySelector('form input[type="password"]')||document.querySelector('input[type="password"]');return e?(e.value||'').length:-1})()""")
+        if _pwlen == len(PW):
+            _pw_ok = True
+            break
+        R.open_challenge(email=email)
+        time.sleep(0.6)
+    if not _pw_ok:
+        log('WARN password not filled after retries: pwlen=%s %s' % (_pwlen, R.ev("""(()=>{try{const ins=[...document.querySelectorAll('input')].map(e=>[e.name||'-',e.type||'-',e.autocomplete||'-',(e.placeholder||'').slice(0,20),(e.value||'').length,e.closest('form')?'in':'out'].join('|'));return JSON.stringify({inputs:ins,href:location.href})}catch(e){return 'js-err '+String(e).slice(0,80)}})()""")))
     # 新版表单（11-24 出现）：验证码是内嵌按钮「Click to start verification」，必须可信点击才出滑块
     xy = R.ev("""(()=>{const b=[...document.querySelectorAll('button,div,span,a,label')].find(e=>e.children.length<5&&/^\\s*(click to start verification|start verification|点击开始验证|开始验证|点击验证)/i.test((e.textContent||'').trim())&&(e.textContent||'').trim().length<40);if(!b)return null;const r=b.getBoundingClientRect();return (r.width>8&&r.height>8)?[r.x+r.width/2,r.y+r.height/2]:null})()""")
     if xy:
@@ -383,6 +391,7 @@ def one_round(trial):
     R.ev("""(()=>{window.__signup=null;const of=window.fetch;window.fetch=async function(...a){const u=String(a[0]||"");const r=await of.apply(this,a);try{if(/auths\/signup/.test(u)){const c=await r.clone().text();window.__signup={st:r.status,body:c.slice(0,200)}}}catch(e){};return r};return 1})()""")
 
     last_v, last_err = 'NO-WIDGET', None
+    ntype = 0
     for att in range(IN_TAB_MAX):
         st = _wait_widget(20 if att == 0 else 12)
         if not _widget_ready(st):
@@ -398,6 +407,18 @@ def one_round(trial):
                 return False, email, 'NO-WIDGET', None
             log(f'widget dead after {att} attempts')
             return False, email, last_v, last_err
+        if 'inpaint' in st['bg']['src'] or not R.ev("""!!document.querySelector('#aliyunCaptcha-puzzle')"""):
+            # 阿里新题型「图片还原」（抹黑竖带，static-captcha-sgp 的 inpainted_with_mask）：现有找洞算法不适用
+            last_v, last_err = 'NEW-TYPE', None
+            ntype += 1
+            if ntype == 1:
+                _dbg_push(st, tag='newtype')
+            if ntype >= 3:
+                log(f'new captcha type x{ntype} -> leave this tab')
+                return False, email, 'NEW-TYPE', None
+            R.ev("""(()=>{const b=document.querySelector('#aliyunCaptcha-btn-refresh')||document.querySelector('#aliyunCaptcha-captcha-body button');if(b)b.click();return 1})()""")
+            time.sleep(2.5 + random.random() * 1.5)
+            continue
         try:
             hx, x0 = R.hole(st)
         except Exception as e:
