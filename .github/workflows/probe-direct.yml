@@ -1,0 +1,20 @@
+name: probe-direct
+on:
+  workflow_dispatch: {}
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: direct egress probe (no proxy)
+        run: |
+          set +e
+          echo "egress: $(curl -s -m 8 https://api.ipify.org) | geo: $(curl -s -m 8 'http://ip-api.com/json/?fields=countryCode,regionName,hosting,org')"
+          echo "GET /api/version -> $(curl -s -m 10 -o /dev/null -w '%{http_code}' https://chat.z.ai/api/version)"
+          echo "GET /auth -> $(curl -s -m 15 -o /dev/null -w '%{http_code}' 'https://chat.z.ai/auth?redirect_uri=fuckzaicn')"
+          for i in 1 2; do
+            echo "POST /auths/signup (junk) -> $(curl -s -m 15 -o /tmp/r.txt -w '%{http_code}' -X POST https://chat.z.ai/api/v1/auths/signup -H 'Content-Type: application/json' -H 'Origin: https://chat.z.ai' -H 'Referer: https://chat.z.ai/auth' -H 'User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36' -d '{"name":"probe'$RANDOM'","email":"probe'$RANDOM'@example.invalid","password":"junk-not-a-real-pw-000","captchaVerifyParam":"{}"}') $(head -c 160 /tmp/r.txt)"
+          done
+          echo "aliyun captcha init -> $(curl -s -m 10 -o /dev/null -w '%{http_code}' https://o.alicdn.com/captcha-frontend/aliyunCaptcha/AliyunCaptcha.js)"
+          echo "zcode balance (no auth) -> $(curl -s -m 10 -o /dev/null -w '%{http_code}' 'https://zcode.z.ai/api/v1/zcode-plan/billing/balance?app_version=3.18.2')"
