@@ -84,8 +84,8 @@ def open_challenge(email=None, name=None):
         email = 'u' + format(int(time.time() * 1000), 'x') + '@' + EMAIL_DOMAIN
     if name is None:
         name = 'u' + format(int(time.time() * 1000), 'x')
-    js = """(()=>{const set=(sel,v)=>{const el=document.querySelector(sel);if(!el)return 0;el.focus();const d=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;d.call(el,v);el.dispatchEvent(new Event('input',{bubbles:true}));return 1};
-      set('form input[autocomplete="name"]','__NAME__');set('form input[name="email"]','__EMAIL__');set('form input[name="new-password"]',__PW__);return 1})()"""
+    js = """(()=>{const el=sel=>document.querySelector(sel);const setEl=(el,v)=>{el.focus();const d=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;d.call(el,v);el.dispatchEvent(new Event('input',{bubbles:true}));return 1};const set=(sel,v)=>{const e=el(sel);return e?setEl(e,v):0};
+      set('form input[autocomplete="name"]','__NAME__');set('form input[name="email"]','__EMAIL__');const pw=el('form input[name="new-password"]')||el('form input[type="password"]');if(pw)setEl(pw,'__PW__');return 1})()"""
     ev(js.replace('__NAME__', name).replace('__EMAIL__', email).replace('__PW__', PW))
     return email
     time.sleep(0.5)

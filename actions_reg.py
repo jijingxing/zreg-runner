@@ -365,6 +365,9 @@ def one_round(trial):
     R.ev("""(()=>{const b=[...document.querySelectorAll("a,button")].find(b=>{const t=(b.textContent||'').trim();return /(sign\s*up|注册)/i.test(t)&&!/google|github|apple|wechat/i.test(t)});if(b){b.click();return 1}return 0})()""")
     wait_for(lambda: R.ev('!!document.querySelector("form input[name=new-password], form input[type=password]")', 6) is True, 10, 0.3)
     email = R.open_challenge()
+    _pwlen = R.ev("""(()=>{const e=document.querySelector('form input[name="new-password"]')||document.querySelector('form input[type="password"]');return e?(e.value||'').length:-1})()""")
+    if _pwlen != len(PW):
+        log(f'WARN password field not filled (len={_pwlen}, want {len(PW)}) → form inputs: ' + str(R.ev("""(()=>[...document.querySelectorAll('form input')].map(e=>(e.name||'-')+'/'+(e.type||'-')+'/'+(e.autocomplete||'-')+'/'+(e.placeholder||'').slice(0,18)))()""")))
     # 新版表单（11-24 出现）：验证码是内嵌按钮「Click to start verification」，必须可信点击才出滑块
     xy = R.ev("""(()=>{const b=[...document.querySelectorAll('button,div,span,a,label')].find(e=>e.children.length<5&&/^\\s*(click to start verification|start verification|点击开始验证|开始验证|点击验证)/i.test((e.textContent||'').trim())&&(e.textContent||'').trim().length<40);if(!b)return null;const r=b.getBoundingClientRect();return (r.width>8&&r.height>8)?[r.x+r.width/2,r.y+r.height/2]:null})()""")
     if xy:
