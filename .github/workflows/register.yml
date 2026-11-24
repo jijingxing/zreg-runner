@@ -51,6 +51,10 @@ jobs:
           COLLECTOR_TOKEN: ${{ secrets.COLLECTOR_TOKEN }}
           CHROME_EXTRA: --no-sandbox
           DISPLAY_NUM: '98'
+          ZREG_PW: ${{ secrets.ZREG_PW }}
+          ZREG_EMAIL_DOMAIN: ${{ secrets.ZREG_EMAIL_DOMAIN }}
+          CLOUDMAIL_EMAIL: ${{ secrets.CLOUDMAIL_EMAIL }}
+          CLOUDMAIL_PASSWORD: ${{ secrets.CLOUDMAIL_PASSWORD }}
         run: |
           python -u actions_reg.py --target "${{ inputs.target || '30' }}" --rounds-max "${{ inputs.rounds_max || '0' }}" --lanes "${{ inputs.lanes || '8' }}"
       - name: artifacts
