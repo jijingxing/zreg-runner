@@ -391,6 +391,7 @@ def one_round(trial):
         if not _widget_ready(st):
             if att == 0:
                 log(_page_ctx('NO-WIDGET'))
+                _dbg_push(st, tag='nowidget')
                 return False, email, 'NO-WIDGET', None
             log(f'widget dead after {att} attempts')
             return False, email, last_v, last_err
@@ -700,6 +701,13 @@ def _shot(st, pad=30, above=50, below=70):
     """题目区域截图（base64 PNG），失败返回空串。"""
     try:
         b = st.get('bg') or {}
+        if not b.get('w'):
+            r = R.ev("""(()=>{const e=document.querySelector('#aliyunCaptcha-window-popup')||document.querySelector('#aliyunCaptcha-window-embed')||document.querySelector('form');if(!e)return null;const q=e.getBoundingClientRect();return {x:q.x,y:q.y,w:Math.max(q.width,300),h:Math.max(q.height,200)}})()""") or {'x': 300, 'y': 150, 'w': 520, 'h': 420}
+            rq = urllib.request.Request(f'http://127.0.0.1:{DRAGD_PORT}/shot',
+                data=json.dumps({'x': max(0, r['x'] - 30), 'y': max(0, r['y'] - 10),
+                                 'w': min(r['w'] + 60, 760), 'h': min(r.get('h', 300) + 200, 640)}).encode(),
+                headers={'Content-Type': 'application/json'})
+            return json.loads(_NO_PROXY_OPENER.open(rq, timeout=30).read()).get('data', '')
         rq = urllib.request.Request(f'http://127.0.0.1:{DRAGD_PORT}/shot',
             data=json.dumps({'x': max(0, b.get('x', 0) - pad), 'y': max(0, b.get('y', 0) - above),
                              'w': b.get('w', 300) + 2 * pad, 'h': b.get('w', 300) + above + below}).encode(),
@@ -709,11 +717,11 @@ def _shot(st, pad=30, above=50, below=70):
         return ''
 
 
-def _dbg_push(st, hx=None, x0=None):
+def _dbg_push(st, hx=None, x0=None, tag='hole'):
     """洞检测失败现场 → collector（kind=dbg）：原图、DOM、区域截图。"""
     try:
         pcu = R.ev("(document.querySelector('#aliyunCaptcha-puzzle')||{src:''}).src") or ''
-        push_collector('dbg', f'hole-L{LANE_ID or 0}', {
+        push_collector('dbg', f'{tag}-L{LANE_ID or 0}', {
             'bg': (st.get('bg') or {}).get('src', '')[:300000], 'pc': pcu[:300000],
             'hx': None if hx is None else float(hx), 'x0': None if x0 is None else int(x0),
             'bg_rect': st.get('bg'), 'slider': st.get('slider'), 'shot': _shot(st),
