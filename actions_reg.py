@@ -91,7 +91,10 @@ def load_proxies(refresh=False):
             return pl
     log(f'fetching proxy pool (max {PROXY_MAXFETCH})...')
     from concurrent.futures import ThreadPoolExecutor
-    cand = proxy_fetch()[:PROXY_MAXFETCH]
+    import random as _rnd
+    cand = proxy_fetch()
+    _rnd.shuffle(cand)                      # 候选 1.3 万：各 job 随机取样，避免都挤在字典序前 800 个出口上
+    cand = cand[:PROXY_MAXFETCH]
     with ThreadPoolExecutor(max_workers=80) as ex:
         rs = [r for r in ex.map(proxy_check, cand) if r]
     rs.sort(key=lambda x: x['latency_ms'])
