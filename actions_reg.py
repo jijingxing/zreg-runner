@@ -312,18 +312,32 @@ IN_TAB_MAX = 14      # 每 tab 页内连刷上限（widget 自动换题，不再
 
 
 def _wait_widget(timeout):
+    """等题目真正可见：滑块把手有宽度 **且** 背景图已布局出来（宽度>50）。
+    只看 naturalWidth 会把「已加载但隐藏（宽 0）」的图当成就绪（11-24 实测：(0/0) 越界 55 次/10 分钟）。"""
     dl = time.time() + timeout
     st = {}
     while time.time() < dl:
         try:
             st = R.state() or {}
-            if st.get('slider') and st.get('bg'):
+            if _widget_ready(st):
                 return st
         except Exception:
             pass
         time.sleep(0.4)
     return st
 
+
+def _widget_ready(st):
+    return bool(st.get('slider') and st.get('bg') and st['bg'].get('w', 0) > 50)
+
+
+def _force_show_captcha():
+    """把阿里验证码窗口（popup/embed）及其隐藏的祖先强制显示出来。"""
+    R.ev("""(()=>{const show=e=>{if(!e)return;e.style.display='block';e.style.visibility='visible';e.style.opacity='1';e.classList.add('aliyunCaptcha-show')};
+show(document.getElementById('aliyunCaptcha-window-popup'));show(document.getElementById('aliyunCaptcha-window-embed'));
+const img=document.getElementById('aliyunCaptcha-img');let p=img;for(let i=0;i<4&&p;i++){if(getComputedStyle(p).display==='none'||getComputedStyle(p).visibility==='hidden')show(p);p=p.parentElement}
+return 1})()""")
+    time.sleep(1.2)
 
 def one_round(trial):
     """一个 tab：开页+填表一次，页内连刷滑块直到 signup 成功或 widget 死。
@@ -368,10 +382,13 @@ def one_round(trial):
     last_v, last_err = 'NO-WIDGET', None
     for att in range(IN_TAB_MAX):
         st = _wait_widget(20 if att == 0 else 12)
-        if not (st.get('slider') and st.get('bg')):
+        if not _widget_ready(st):
+            _force_show_captcha()
+            st = _wait_widget(8)
+        if not _widget_ready(st):
             R.ev("""(()=>{const b=document.querySelector('#aliyunCaptcha-captcha-body button')||document.querySelector('#aliyunCaptcha-captcha-body');if(b)b.click();return 1})()""")
-            st = _wait_widget(10)
-        if not (st.get('slider') and st.get('bg')):
+            st = _wait_widget(8)
+        if not _widget_ready(st):
             if att == 0:
                 log(_page_ctx('NO-WIDGET'))
                 return False, email, 'NO-WIDGET', None
@@ -389,8 +406,9 @@ def one_round(trial):
             try:   # 现场留存：把这道题的背景/拼图原图送 collector，VPS 侧离线复算
                 pcu = R.ev("(document.querySelector('#aliyunCaptcha-puzzle')||{src:''}).src") or ''
                 push_collector('dbg', f'hole-L{LANE_ID or 0}', {
-                    'bg': st['bg']['src'][:300000], 'pc': pcu[:300000], 'hx': hx, 'x0': x0,
+                    'bg': st['bg']['src'][:300000], 'pc': pcu[:300000], 'hx': float(hx), 'x0': int(x0),
                     'bg_rect': st['bg'], 'slider': st.get('slider'),
+                    'dom': R.ev("""(()=>{const o={};for(const id of ['aliyunCaptcha-window-popup','aliyunCaptcha-window-embed','aliyunCaptcha-img','aliyunCaptcha-puzzle','aliyunCaptcha-sliding-slider','aliyunCaptcha-captcha-body']){const e=document.getElementById(id);if(!e){o[id]='absent';continue}const r=e.getBoundingClientRect();const cs=getComputedStyle(e);o[id]=[Math.round(r.x),Math.round(r.y),Math.round(r.width),Math.round(r.height),cs.display,cs.visibility,cs.opacity].join('|')}return o})()"""),
                     'puzzle_rect': R.ev("(()=>{const p=document.querySelector('#aliyunCaptcha-puzzle');if(!p)return null;const r=p.getBoundingClientRect();return {x:r.x,y:r.y,w:r.width,h:r.height,nw:p.naturalWidth,nh:p.naturalHeight,complete:p.complete}})()")})
             except Exception as e:
                 log(f'dbg push fail {repr(e)[:40]}')
