@@ -672,8 +672,13 @@ def _claim_plan_on_exit(jwt, mid, proxy_url, max_drag):
     from zreg_min import http_box
     import random
     plan_id = current_plan_id(jwt, mid)
-    tid = (_tab('new', url=f'http://127.0.0.1:{DRAGD_PORT}/zclaim.html').get('targetId'))
+    # 页面必须是 about:blank（revive5 配方）：场景 11xygtvd 疑似配了域名限制，http://127.0.0.1 来源下
+    # SDK 初始化正常但静默不创建任何 widget DOM（11-24 诊断实证：ids=[] 且 refresh() 无报错）
+    from dragd2 import ZCLAIM_PAGE
+    tid = (_tab('new', url='about:blank#zclaim').get('targetId'))
     try:
+        wait_for(lambda: R.ev('document.readyState==="complete"', 6) is True, 10, 0.5)
+        R.ev('document.open();document.write(' + json.dumps(ZCLAIM_PAGE) + ');document.close();1')
         wait_for(lambda: R.ev('document.readyState==="complete" && typeof window.initAliyunCaptcha==="function"', 10) is True, 30, 0.5)
         wait_for(lambda: R.ev('!!window.__inst', 6) is True, 15, 0.5)      # getInstance 回调
         R.ev("""(()=>{const b=document.querySelector('#go');if(b)b.click();return 1})()""")
