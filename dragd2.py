@@ -626,6 +626,14 @@ class H(BaseHTTPRequestHandler):
 
         async def go():
             async with websockets.connect(ws_url, max_size=20_000_000) as ws:
+                if path == '/shot':
+                    # 区域截图（PNG base64）：调试新题型用
+                    c = Conn(ws)
+                    i = await c.send('Page.captureScreenshot', {'format': 'png', 'clip': {
+                        'x': float(body.get('x', 0)), 'y': float(body.get('y', 0)),
+                        'width': float(body.get('w', 400)), 'height': float(body.get('h', 300)), 'scale': 1}})
+                    m = await c.wait(i, timeout=15)
+                    return {'ok': True, 'data': (m.get('result') or {}).get('data', '')}
                 if path == '/click':
                     # 可信点击（CDP 输入，isTrusted=true）：阿里 SDK embed 模式不认页面内 JS .click()
                     x, y = float(body['x']), float(body['y'])
