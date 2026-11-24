@@ -397,24 +397,14 @@ def one_round(trial):
         try:
             hx, x0 = R.hole(st)
         except Exception as e:
+            _dbg_push(st)
             return False, email, f'HOLE-ERR {repr(e)[:40]}', None
         target = st['bg']['x'] + (hx - x0) * (st['bg']['w'] / st['bg']['nw'])
         off = target - st['bg']['x']
         if not (6 <= off <= st['bg']['w'] - 6):
             # 洞检测给出越界值（实测出现过 err=-571px）：这种图 CV 失效，拖了也是白拖 → 换题
             log(f'hole out of range ({off:.0f}/{st["bg"]["w"]:.0f}) → refresh challenge')
-            try:   # 现场留存：把这道题的背景/拼图原图送 collector，VPS 侧离线复算
-                pcu = R.ev("(document.querySelector('#aliyunCaptcha-puzzle')||{src:''}).src") or ''
-                push_collector('dbg', f'hole-L{LANE_ID or 0}', {
-                    'bg': st['bg']['src'][:300000], 'pc': pcu[:300000], 'hx': float(hx), 'x0': int(x0),
-                    'bg_rect': st['bg'], 'slider': st.get('slider'),
-                    'html': (R.ev("""(()=>{const e=document.querySelector('#aliyunCaptcha-window-popup')||document.querySelector('#aliyunCaptcha-window-embed')||document.querySelector('#aliyunCaptcha-captcha-body');return e?e.outerHTML.replace(/src="data:[^"]{200,}"/g,'src="data:…"').slice(0,7000):'no-container'})()""") or ''),
-                    'els': (R.ev("""(()=>[...document.querySelectorAll('[id^=aliyunCaptcha],canvas')].map(e=>{const r=e.getBoundingClientRect();return e.tagName+'#'+e.id+'.'+String(e.className).slice(0,30)+' @'+Math.round(r.x)+','+Math.round(r.y)+' '+Math.round(r.width)+'x'+Math.round(r.height)}))()""") or []),
-                    'shot': _shot(st),
-                    'dom': R.ev("""(()=>{const o={};for(const id of ['aliyunCaptcha-window-popup','aliyunCaptcha-window-embed','aliyunCaptcha-img','aliyunCaptcha-puzzle','aliyunCaptcha-sliding-slider','aliyunCaptcha-captcha-body']){const e=document.getElementById(id);if(!e){o[id]='absent';continue}const r=e.getBoundingClientRect();const cs=getComputedStyle(e);o[id]=[Math.round(r.x),Math.round(r.y),Math.round(r.width),Math.round(r.height),cs.display,cs.visibility,cs.opacity].join('|')}return o})()"""),
-                    'puzzle_rect': R.ev("(()=>{const p=document.querySelector('#aliyunCaptcha-puzzle');if(!p)return null;const r=p.getBoundingClientRect();return {x:r.x,y:r.y,w:r.width,h:r.height,nw:p.naturalWidth,nh:p.naturalHeight,complete:p.complete}})()")})
-            except Exception as e:
-                log(f'dbg push fail {repr(e)[:40]}')
+            _dbg_push(st, hx, x0)
             R.ev("""(()=>{const b=document.querySelector('#aliyunCaptcha-captcha-body button')||document.querySelector('#aliyunCaptcha-refreshIcon')||document.querySelector('.aliyunCaptcha-refresh');if(b)b.click();return 1})()""")
             time.sleep(2.5 + random.random() * 1.5)
             continue
@@ -717,6 +707,20 @@ def _shot(st, pad=30, above=50, below=70):
         return json.loads(_NO_PROXY_OPENER.open(rq, timeout=30).read()).get('data', '')
     except Exception:
         return ''
+
+
+def _dbg_push(st, hx=None, x0=None):
+    """洞检测失败现场 → collector（kind=dbg）：原图、DOM、区域截图。"""
+    try:
+        pcu = R.ev("(document.querySelector('#aliyunCaptcha-puzzle')||{src:''}).src") or ''
+        push_collector('dbg', f'hole-L{LANE_ID or 0}', {
+            'bg': (st.get('bg') or {}).get('src', '')[:300000], 'pc': pcu[:300000],
+            'hx': None if hx is None else float(hx), 'x0': None if x0 is None else int(x0),
+            'bg_rect': st.get('bg'), 'slider': st.get('slider'), 'shot': _shot(st),
+            'els': (R.ev("""(()=>[...document.querySelectorAll('[id^=aliyunCaptcha],canvas')].map(e=>{const r=e.getBoundingClientRect();return e.tagName+'#'+e.id+'.'+String(e.className).slice(0,30)+' @'+Math.round(r.x)+','+Math.round(r.y)+' '+Math.round(r.width)+'x'+Math.round(r.height)}))()""") or []),
+            'html': (R.ev("""(()=>{const e=document.querySelector('#aliyunCaptcha-window-popup')||document.querySelector('#aliyunCaptcha-window-embed')||document.querySelector('#aliyunCaptcha-captcha-body');return e?e.outerHTML.replace(/src="data:[^"]{200,}"/g,'src="data:…"').slice(0,7000):'no-container'})()""") or '')})
+    except Exception as e:
+        log(f'dbg push fail {repr(e)[:40]}')
 
 
 def _claim_diag():
