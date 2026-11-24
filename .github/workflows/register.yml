@@ -1,0 +1,61 @@
+name: register
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'how many accounts this run'
+        default: '20'
+      rounds_max:
+        description: 'max rounds (0 = no cap)'
+        default: '0'
+      lanes:
+        description: 'parallel lanes (chrome+dragd+proxy each)'
+        default: '5'
+  schedule:
+    - cron: '0 1,9,17 * * *'   # 每 8h 一轮，可按需关掉
+
+concurrency:
+  group: register
+  cancel-in-progress: false
+
+jobs:
+  reg:
+    runs-on: ubuntu-latest
+    timeout-minutes: 110
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: deps
+        run: |
+          pip install websockets numpy pillow
+          # runner 自带 chrome+xvfb；缺失则限时装（wget/curl 必须带超时，防挂死）
+          if ! command -v google-chrome && ! command -v google-chrome-stable; then
+            curl -fsSL --max-time 180 -o /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb \
+              && sudo apt-get update -qq && sudo apt-get install -y -qq /tmp/chrome.deb xvfb
+          fi
+          (google-chrome --version 2>/dev/null || google-chrome-stable --version 2>/dev/null || echo 'WARN: no chrome')
+      - name: run
+        env:
+          COLLECTOR_URL: ${{ secrets.COLLECTOR_URL }}
+          COLLECTOR_TOKEN: ${{ secrets.COLLECTOR_TOKEN }}
+          CHROME_EXTRA: --no-sandbox
+          DISPLAY_NUM: '98'
+        run: |
+          python -u actions_reg.py --target "${{ inputs.target || '20' }}" --rounds-max "${{ inputs.rounds_max || '0' }}" --lanes "${{ inputs.lanes || '5' }}"
+      - name: artifacts
+        if: always()
+        continue-on-error: true   # 私有库 artifact 配额满了不阻断（数据走 collector）
+        uses: actions/upload-artifact@v4
+        with:
+          name: zreg-run-${{ github.run_id }}
+          path: |
+            accounts.jsonl
+            actions_reg.log
+            actions_state.json
+            dragd.log
+            chrome.log
+            proxies.json
+          if-no-files-found: ignore
+          retention-days: 7

@@ -1,0 +1,45 @@
+name: claim-plan
+on:
+  workflow_dispatch:
+    inputs:
+      lanes:
+        description: 'parallel lanes'
+        default: '4'
+      batch:
+        description: 'accounts per proxy exit (~5/IP quota)'
+        default: '4'
+      max_batches:
+        description: 'debug: stop each lane after N batches (0 = until queue empty)'
+        default: '0'
+
+concurrency:
+  group: claim-plan
+  cancel-in-progress: false
+
+jobs:
+  claim:
+    runs-on: ubuntu-latest
+    timeout-minutes: 100
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: deps
+        run: |
+          pip install websockets numpy pillow
+          (google-chrome --version 2>/dev/null || google-chrome-stable --version 2>/dev/null || echo 'WARN: no chrome')
+      - name: claim
+        env:
+          COLLECTOR_URL: ${{ secrets.COLLECTOR_URL }}
+          COLLECTOR_TOKEN: ${{ secrets.COLLECTOR_TOKEN }}
+          CHROME_EXTRA: --no-sandbox
+          DISPLAY_NUM: '98'
+        run: |
+          python -u claim_reg.py --lanes "${{ inputs.lanes || '4' }}" --batch "${{ inputs.batch || '4' }}" --max-batches "${{ inputs.max_batches || '0' }}"
+      - name: summary
+        if: always()
+        run: |
+          echo 'claimed:' $(grep -c "PLAN ACTIVE" actions_reg.log || true)
+          echo 'failed:'  $(grep -c "PLAN ✗" actions_reg.log || true)
+          grep -E "PLAN (ACTIVE|✗)" actions_reg.log | sed -E 's/.*\] //' | awk '{print $NF}' | sort | uniq -c | sort -rn | head -12

@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+accounts.jsonl
+actions_state.json
+actions_reg.log
+dragd.log
+proxies.json
+zreg_state_out/
+cred_out/
+chrome.log

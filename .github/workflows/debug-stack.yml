@@ -1,0 +1,26 @@
+name: debug-stack
+on:
+  workflow_dispatch: {}
+
+jobs:
+  dbg:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install websockets numpy pillow
+      - name: run real pipeline (2 lanes, no collector)
+        run: |
+          python -u actions_reg.py --target 2 --rounds-max 40 --lanes 2
+        env:
+          CHROME_EXTRA: --no-sandbox
+          DISPLAY_NUM: '98'
+      - name: dump logs
+        if: always()
+        run: |
+          echo '===== actions_reg.log'; tail -80 actions_reg.log 2>/dev/null || true
+          echo '===== dragd.log'; grep -E "\[req\] /dragto3|500" dragd.log 2>/dev/null | tail -40 || true
+          echo '===== chrome.log'; tail -10 chrome.log 2>/dev/null || true
