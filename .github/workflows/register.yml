@@ -3,16 +3,19 @@ on:
   workflow_dispatch:
     inputs:
       target:
-        description: 'how many accounts this run'
-        default: '20'
+        description: 'accounts per job'
+        default: '30'
       rounds_max:
-        description: 'max rounds (0 = no cap)'
+        description: 'max rounds per lane (0 = no cap)'
         default: '0'
       lanes:
-        description: 'parallel lanes (chrome+dragd+proxy each)'
-        default: '5'
+        description: 'parallel lanes per job (chrome+dragd+proxy each)'
+        default: '8'
+      nodes:
+        description: 'JSON list of parallel jobs, e.g. [1,2,3,4]'
+        default: '[1,2,3,4]'
   schedule:
-    - cron: '0 1,9,17 * * *'   # 每 8h 一轮，可按需关掉
+    - cron: '0 1,9,17 * * *'   # 每 8h 一轮
 
 concurrency:
   group: register
@@ -20,13 +23,19 @@ concurrency:
 
 jobs:
   reg:
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ${{ fromJSON(github.event.inputs.nodes || '[1,2,3,4]') }}
+    name: reg-${{ matrix.node }}
     runs-on: ubuntu-latest
-    timeout-minutes: 110
+    timeout-minutes: 330
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - run: pip install pyyaml
       - name: deps
         run: |
           pip install websockets numpy pillow
@@ -43,13 +52,13 @@ jobs:
           CHROME_EXTRA: --no-sandbox
           DISPLAY_NUM: '98'
         run: |
-          python -u actions_reg.py --target "${{ inputs.target || '20' }}" --rounds-max "${{ inputs.rounds_max || '0' }}" --lanes "${{ inputs.lanes || '5' }}"
+          python -u actions_reg.py --target "${{ inputs.target || '30' }}" --rounds-max "${{ inputs.rounds_max || '0' }}" --lanes "${{ inputs.lanes || '8' }}"
       - name: artifacts
         if: always()
         continue-on-error: true   # 私有库 artifact 配额满了不阻断（数据走 collector）
         uses: actions/upload-artifact@v4
         with:
-          name: zreg-run-${{ github.run_id }}
+          name: zreg-run-${{ github.run_id }}-${{ matrix.node }}
           path: |
             accounts.jsonl
             actions_reg.log

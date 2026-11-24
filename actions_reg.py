@@ -656,6 +656,18 @@ def _claim_show_widget():
     time.sleep(0.8)
 
 
+def _claim_diag():
+    """滑块不出时的页面现场：aliyun DOM 节点及尺寸/显隐、__inst、refresh() 结果、资源加载明细。"""
+    try:
+        return R.ev("""(()=>{const q=[...document.querySelectorAll('[id^="aliyunCaptcha"]')];
+const ids=q.slice(0,8).map(e=>{const r=e.getBoundingClientRect();return e.id.slice(14,30)+':'+Math.round(r.width)+'x'+Math.round(r.height)+':'+getComputedStyle(e).display});
+const res=performance.getEntriesByType('resource').map(e=>e.name.replace(/^https?:\/\//,'').slice(0,44)+'#'+(e.responseStatus||'?')+'/'+Math.round(e.duration));
+let rf='';try{if(window.__inst){window.__inst.refresh();rf='refresh-ok'}else{rf='no-inst'}}catch(e){rf='refresh-err:'+String(e&&e.message||e).slice(0,40)}
+return JSON.stringify({ids,rf,err:String(window.__err||'').slice(0,40),res:res.slice(-8)})})()""")
+    except Exception as e:
+        return f'diag-err {repr(e)[:60]}'
+
+
 def _claim_plan_on_exit(jwt, mid, proxy_url, max_drag):
     from zreg_min import http_box
     import random
@@ -673,8 +685,10 @@ def _claim_plan_on_exit(jwt, mid, proxy_url, max_drag):
                 st = _wait_widget(20)
             if not (st.get('slider') and st.get('bg')):
                 err = R.ev('window.__err||""')
+                diag = _claim_diag()
+                log(f'  claim-diag: {diag}')
                 if att == 0:
-                    return False, f'NO-WIDGET {str(err)[:30]}'
+                    return False, f'NO-WIDGET {str(err)[:20]} | {diag[:230]}'
                 return False, 'widget-dead'
             try:
                 hx, x0 = R.hole(st)
@@ -841,7 +855,7 @@ def main():
                     json.dump(state['credential'],
                               open(f'{BASE}/cred_out/{nm}.json', 'w'))
                     push_collector('cred', nm, state['credential'])
-                if state.get('credential') and not os.environ.get('ZREG_NO_CLAIM'):
+                if state.get('credential') and os.environ.get('ZREG_DO_CLAIM'):   # 新号 ~1h 自动开通，默认不领
                     act, why = claim_plan(state['zcode_jwt'], state.get('device_mid'), proxies[idx]['url'],
                                          alt_proxies=[p['url'] for p in proxies if p['url'] != proxies[idx]['url']])
                     push_collector('plan', nm, {'active': act, 'why': why,
