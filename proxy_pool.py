@@ -14,7 +14,10 @@ SOURCES = [
     "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt",
     "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
     "https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list.txt",
-    "https://www.proxyscrape.com/api?request=displayproxies&protocol=http&timeout=3000&country=all&ssl=all&anonymity=all",
+    "https://raw.githubusercontent.com/mmpx12/proxy-list/master/https.txt",
+    "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/http.txt",
+    "https://raw.githubusercontent.com/roosterkid/openproxylist/main/HTTPS_RAW.txt",
+    "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/all/data.txt",
 ]
 # clarketm 格式: ip:port 后面带元数据
 PAT = re.compile(r"(\d{1,3}(?:\.\d{1,3}){3}:\d{2,5})")

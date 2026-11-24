@@ -40,7 +40,7 @@ CDP_PORT = int(os.environ.get('CDP_PORT', '9333'))
 DRAGD_PORT = int(os.environ.get('DRAGD_PORT', '19333'))
 DISPLAY_NUM = os.environ.get('DISPLAY_NUM', '98')
 PROXY_N = int(os.environ.get('PROXY_N', '48'))
-PROXY_MAXFETCH = int(os.environ.get('PROXY_MAXFETCH', '400'))
+PROXY_MAXFETCH = int(os.environ.get('PROXY_MAXFETCH', '800'))
 COLLECTOR_URL = os.environ.get('COLLECTOR_URL', '')
 COLLECTOR_TOKEN = os.environ.get('COLLECTOR_TOKEN', '')
 ACCT_F = f'{BASE}/accounts.jsonl'
@@ -348,6 +348,17 @@ def one_round(trial):
     R.ev("""(()=>{const b=[...document.querySelectorAll("a,button")].find(b=>{const t=(b.textContent||'').trim();return /(sign\s*up|注册)/i.test(t)&&!/google|github|apple|wechat/i.test(t)});if(b){b.click();return 1}return 0})()""")
     wait_for(lambda: R.ev('!!document.querySelector("form input[name=new-password], form input[type=password]")', 6) is True, 10, 0.3)
     email = R.open_challenge()
+    # 新版表单（11-24 出现）：验证码是内嵌按钮「Click to start verification」，必须可信点击才出滑块
+    xy = R.ev("""(()=>{const b=[...document.querySelectorAll('button,div,span,a,label')].find(e=>e.children.length<5&&/^\\s*(click to start verification|start verification|点击开始验证|开始验证|点击验证)/i.test((e.textContent||'').trim())&&(e.textContent||'').trim().length<40);if(!b)return null;const r=b.getBoundingClientRect();return (r.width>8&&r.height>8)?[r.x+r.width/2,r.y+r.height/2]:null})()""")
+    if xy:
+        try:
+            rq = urllib.request.Request(f'http://127.0.0.1:{DRAGD_PORT}/click',
+                data=json.dumps({'x': xy[0], 'y': xy[1]}).encode(),
+                headers={'Content-Type': 'application/json'})
+            _NO_PROXY_OPENER.open(rq, timeout=30).read()
+            log('start-verification button clicked')
+        except Exception as e:
+            log(f'start-verification click fail: {repr(e)[:50]}')
     # fetch 钩子装一次，整个 tab 生命周期有效
     R.ev("""(()=>{window.__signup=null;const of=window.fetch;window.fetch=async function(...a){const u=String(a[0]||"");const r=await of.apply(this,a);try{if(/auths\/signup/.test(u)){const c=await r.clone().text();window.__signup={st:r.status,body:c.slice(0,200)}}}catch(e){};return r};return 1})()""")
 
@@ -368,6 +379,13 @@ def one_round(trial):
         except Exception as e:
             return False, email, f'HOLE-ERR {repr(e)[:40]}', None
         target = st['bg']['x'] + (hx - x0) * (st['bg']['w'] / st['bg']['nw'])
+        off = target - st['bg']['x']
+        if not (6 <= off <= st['bg']['w'] - 6):
+            # 洞检测给出越界值（实测出现过 err=-571px）：这种图 CV 失效，拖了也是白拖 → 换题
+            log(f'hole out of range ({off:.0f}/{st["bg"]["w"]:.0f}) → refresh challenge')
+            R.ev("""(()=>{const b=document.querySelector('#aliyunCaptcha-captcha-body button')||document.querySelector('#aliyunCaptcha-refreshIcon')||document.querySelector('.aliyunCaptcha-refresh');if(b)b.click();return 1})()""")
+            time.sleep(2.5 + random.random() * 1.5)
+            continue
         # dragto3 带软重试：widget-not-ready / 瞬时 500 重等 widget 再拖，不当轮失败
         r = None
         for dtry in range(3):
