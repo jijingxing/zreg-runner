@@ -647,6 +647,15 @@ def claim_plan(jwt, mid, proxy_url, max_drag=14, alt_proxies=None):
     return False, last or 'balance-exit-blocked'
 
 
+def _claim_show_widget():
+    """embed 模式下 widget DOM 默认不出、窗口默认隐藏（revive5 配方 ensure_widget）：
+    无 DOM → __inst.refresh() 触发；再把 #aliyunCaptcha-window-embed 强制显示。"""
+    R.ev("""(()=>{if(document.querySelectorAll('[id^="aliyunCaptcha"]').length===0){try{window.__inst.refresh();}catch(e){}}return 1})()""")
+    time.sleep(5)
+    R.ev("""(()=>{const w=document.getElementById('aliyunCaptcha-window-embed');if(w){w.style.display='block';w.classList.add('aliyunCaptcha-show');}return 1})()""")
+    time.sleep(0.8)
+
+
 def _claim_plan_on_exit(jwt, mid, proxy_url, max_drag):
     from zreg_min import http_box
     import random
@@ -654,13 +663,14 @@ def _claim_plan_on_exit(jwt, mid, proxy_url, max_drag):
     tid = (_tab('new', url=f'http://127.0.0.1:{DRAGD_PORT}/zclaim.html').get('targetId'))
     try:
         wait_for(lambda: R.ev('document.readyState==="complete" && typeof window.initAliyunCaptcha==="function"', 10) is True, 30, 0.5)
+        wait_for(lambda: R.ev('!!window.__inst', 6) is True, 15, 0.5)      # getInstance 回调
         R.ev("""(()=>{const b=document.querySelector('#go');if(b)b.click();return 1})()""")
         used = 0
         for att in range(max_drag):
-            st = _wait_widget(25 if att == 0 else 12)
+            st = _wait_widget(10)
             if not (st.get('slider') and st.get('bg')):
-                R.ev("""(()=>{const b=document.querySelector('#aliyunCaptcha-captcha-body button')||document.querySelector('#aliyunCaptcha-captcha-body');if(b)b.click();return 1})()""")
-                st = _wait_widget(8)
+                _claim_show_widget()
+                st = _wait_widget(20)
             if not (st.get('slider') and st.get('bg')):
                 err = R.ev('window.__err||""')
                 if att == 0:
@@ -677,7 +687,7 @@ def _claim_plan_on_exit(jwt, mid, proxy_url, max_drag):
                 headers={'Content-Type': 'application/json'})
             try:
                 r = json.loads(_NO_PROXY_OPENER.open(rq, timeout=300).read())
-            except Exception as e:
+            except Exception:
                 time.sleep(1.5)
                 continue
             dl = time.time() + 12
@@ -689,6 +699,7 @@ def _claim_plan_on_exit(jwt, mid, proxy_url, max_drag):
                 time.sleep(0.4)
             if n <= used:
                 time.sleep(2 + random.random() * 2)   # F0xx：SDK 换题
+                _claim_show_widget()
                 continue
             tok = R.ev(f'window.__tokens[{used}]')
             used += 1
@@ -700,11 +711,12 @@ def _claim_plan_on_exit(jwt, mid, proxy_url, max_drag):
                 return False, 'ip-quota'
             dl = time.time() + 16                      # 异步落账，以 balance 为准
             while time.time() < dl:
-                a = plan_active(jwt, mid)
+                a, hs = plan_active(jwt, mid)
                 if a:
                     return True, f'claimed att{att + 1}'
                 time.sleep(2.5)
             time.sleep(1.5 + random.random())
+            _claim_show_widget()                       # 下一个 token：出新题
         return False, 'no-plan-after-max-drag'
     finally:
         if tid:
