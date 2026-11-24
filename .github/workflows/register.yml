@@ -55,6 +55,7 @@ jobs:
           ZREG_EMAIL_DOMAIN: ${{ secrets.ZREG_EMAIL_DOMAIN }}
           CLOUDMAIL_EMAIL: ${{ secrets.CLOUDMAIL_EMAIL }}
           CLOUDMAIL_PASSWORD: ${{ secrets.CLOUDMAIL_PASSWORD }}
+          HB_NAME: job-${{ matrix.node }}
         run: |
           python -u actions_reg.py --target "${{ inputs.target || '30' }}" --rounds-max "${{ inputs.rounds_max || '0' }}" --lanes "${{ inputs.lanes || '8' }}"
       - name: artifacts

@@ -769,6 +769,20 @@ def push_collector(kind, name, data):
 
 
 # ---------------------------------------------------------------- main
+def _heartbeat(name):
+    """每 45s 把共享日志尾巴推给 collector（kind=log），长跑时 VPS 侧可实时看，不必等 job 结束。"""
+    import threading
+    def _run():
+        while True:
+            time.sleep(45)
+            try:
+                lines = open(LOG_F, 'rb').read()[-6000:].decode(errors='replace').splitlines()[-40:]
+                push_collector('log', name, {'lines': lines})
+            except Exception:
+                pass
+    threading.Thread(target=_run, daemon=True).start()
+
+
 def spawn_lanes(n, target, rounds_max):
     """多 lane 管理：Xvfb 共享，每 lane 独立 chrome+dragd+profile+代理分片。"""
     proxies = load_proxies(refresh=False)
@@ -777,6 +791,9 @@ def spawn_lanes(n, target, rounds_max):
         sys.exit(1)
     log(f'lanes={n} target={target} proxies={len(proxies)}')
     ensure_xvfb()                          # 父进程先起公共 Xvfb
+    hb = os.environ.get('HB_NAME')
+    if hb and COLLECTOR_URL:
+        _heartbeat(hb)
     per = [target // n + (1 if k < target % n else 0) for k in range(n)]
     rm = [rounds_max // n + (1 if k < rounds_max % n else 0) if rounds_max else 0
           for k in range(n)]
