@@ -626,6 +626,20 @@ class H(BaseHTTPRequestHandler):
 
         async def go():
             async with websockets.connect(ws_url, max_size=20_000_000) as ws:
+                if path == '/click':
+                    # 可信点击（CDP 输入，isTrusted=true）：阿里 SDK embed 模式不认页面内 JS .click()
+                    x, y = float(body['x']), float(body['y'])
+                    c = Conn(ws)
+                    await c.fire('Input.dispatchMouseEvent', {'type': 'mouseMoved', 'x': x - 4, 'y': y + 3})
+                    await asyncio.sleep(0.06)
+                    await c.fire('Input.dispatchMouseEvent', {'type': 'mouseMoved', 'x': x, 'y': y})
+                    await asyncio.sleep(0.05)
+                    await c.fire('Input.dispatchMouseEvent', {'type': 'mousePressed', 'x': x, 'y': y,
+                                                              'button': 'left', 'buttons': 1, 'clickCount': 1})
+                    await asyncio.sleep(0.09)
+                    await c.fire('Input.dispatchMouseEvent', {'type': 'mouseReleased', 'x': x, 'y': y,
+                                                              'button': 'left', 'buttons': 0, 'clickCount': 1})
+                    return {'ok': True, 'x': x, 'y': y}
                 if path == '/dragto3':
                     # 开 watcher 抓判定码，拖完等 1s 读最新判定
                     while len(VERDICTS):

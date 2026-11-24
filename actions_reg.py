@@ -681,7 +681,16 @@ def _claim_plan_on_exit(jwt, mid, proxy_url, max_drag):
         R.ev('document.open();document.write(' + json.dumps(ZCLAIM_PAGE) + ');document.close();1')
         wait_for(lambda: R.ev('document.readyState==="complete" && typeof window.initAliyunCaptcha==="function"', 10) is True, 30, 0.5)
         wait_for(lambda: R.ev('!!window.__inst', 6) is True, 15, 0.5)      # getInstance 回调
-        R.ev("""(()=>{const b=document.querySelector('#go');if(b)b.click();return 1})()""")
+        # #go 必须可信点击（CDP 输入）。JS .click() 是 untrusted，SDK embed 模式不触发挑战
+        xy = R.ev("""(()=>{const b=document.querySelector('#go');if(!b)return null;const r=b.getBoundingClientRect();return [r.x+r.width/2,r.y+r.height/2]})()""")
+        if xy:
+            rq = urllib.request.Request(f'http://127.0.0.1:{DRAGD_PORT}/click',
+                data=json.dumps({'x': xy[0], 'y': xy[1]}).encode(),
+                headers={'Content-Type': 'application/json'})
+            try:
+                _NO_PROXY_OPENER.open(rq, timeout=30).read()
+            except Exception as e:
+                log(f'  go-click fail: {repr(e)[:60]}')
         used = 0
         for att in range(max_drag):
             st = _wait_widget(10)
