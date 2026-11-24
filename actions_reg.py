@@ -190,7 +190,7 @@ def start_stack(proxy_url):
                    f'--proxy-server={proxy_url}',
                    f'--proxy-bypass-list={ALI_BYPASS}',
                    '--window-size=1440,900', '--window-position=0,0',
-                   'https://chat.z.ai/auth?redirect_uri=fuckzaicn']
+                   'about:blank']
     for extra in os.environ.get('CHROME_EXTRA', '').split():
         chrome_args.insert(1, extra)
     _procs['chrome'] = subprocess.Popen(chrome_args, stdout=subprocess.DEVNULL,
@@ -345,6 +345,20 @@ def one_round(trial):
     import random
     R.PORT = DRAGD_PORT
     open_new_tab()
+    # 等 SPA 就绪；代理一死页面就是 chrome-error → 立刻判 PROXY-DEAD 换出口（不再干等 45s）
+    _dl = time.time() + 45
+    _st = 'wait'
+    while time.time() < _dl:
+        try:
+            _st = R.ev("""location.href.indexOf("chrome-error")==0?"err":(document.readyState==="complete"&&(document.querySelector("form input")||[...document.querySelectorAll("a,button")].some(b=>/Continue with Email/i.test(b.textContent||""))))?"ok":"wait")""")
+        except Exception:
+            _st = 'wait'
+        if _st in ('ok', 'err'):
+            break
+        time.sleep(0.5)
+    if _st == 'err':
+        log(_page_ctx('PROXY-DEAD'))
+        return False, '-', 'PROXY-DEAD', None
     wait_for(lambda: R.ev(
         'document.readyState==="complete" && '
         '(!!document.querySelector("form input") || '
@@ -407,7 +421,7 @@ def one_round(trial):
                 return False, email, 'NO-WIDGET', None
             log(f'widget dead after {att} attempts')
             return False, email, last_v, last_err
-        if 'inpaint' in st['bg']['src'] or not R.ev("""!!document.querySelector('#aliyunCaptcha-puzzle')"""):
+        if not R.ev("""!!document.querySelector('#aliyunCaptcha-puzzle')"""):   # inpainted 新题型由 hole_restore 解
             # 阿里新题型「图片还原」（抹黑竖带，static-captcha-sgp 的 inpainted_with_mask）：现有找洞算法不适用
             last_v, last_err = 'NEW-TYPE', None
             ntype += 1
@@ -1008,7 +1022,7 @@ def main():
                 st['nw_streak'] = (st.get('nw_streak', 0) + 1)
             elif v.startswith(('EXC', 'DRAG-ERR', 'NO-VERDICT')) or 'Timeout' in v:
                 st['err_streak'] += 1
-            rotate_now = (v == 'PAGE-BLANK' or quota or st['f_streak'] >= F_WALL
+            rotate_now = (v in ('PAGE-BLANK', 'PROXY-DEAD') or quota or st['f_streak'] >= F_WALL
                           or st.get('nw_streak', 0) >= 2 or st['err_streak'] >= 2
                           or st['signups_this_proxy'] >= 16)
             if rotate_now:
@@ -1016,7 +1030,7 @@ def main():
                     f'err={st["err_streak"]} signups={st["signups_this_proxy"]})')
                 # 页面/基础设施烂 → 记入 bad，run 内不再回头；quota/F 墙只是额度问题不记
                 bad = st.setdefault('bad_proxies', [])
-                if v in ('PAGE-BLANK', 'NO-WIDGET') or (v.startswith('EXC') and st['err_streak'] >= 2):
+                if v in ('PAGE-BLANK', 'NO-WIDGET', 'PROXY-DEAD') or (v.startswith('EXC') and st['err_streak'] >= 2):
                     if proxies[idx]['url'] not in bad:
                         bad.append(proxies[idx]['url'])
                 for _ in range(len(proxies)):
