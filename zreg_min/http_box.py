@@ -17,9 +17,24 @@ def log_default(msg):
 
 
 _OP = None
+import threading as _threading
+_TLS = _threading.local()
+
+
+def set_thread_proxy(url):
+    """线程级出口：设了之后本线程的 get_opener() 走该代理（多线程后台激活各用各的 lane）。"""
+    _TLS.url = url or ''
+    _TLS.op = None
 
 
 def get_opener():
+    _v = getattr(_TLS, 'url', '')
+    if _v:
+        if getattr(_TLS, 'op', None) is None:
+            _TLS.op = urllib.request.build_opener(
+                urllib.request.ProxyHandler({'http': _v, 'https': _v}))
+            _TLS.op.addheaders = [('User-Agent', UA)]
+        return _TLS.op
     global _OP
     if _OP is None:
         v = os.environ.get("ZREG_HTTP_PROXY_URL", "").strip()

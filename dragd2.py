@@ -90,10 +90,46 @@ def browser_ws():
     return v.get('webSocketDebuggerUrl')
 
 
+def _auth_responder():
+    """带密码的上游代理：Chrome 不会从 --proxy-server 带凭据，这里在浏览器级 CDP 会话上
+    开 Fetch.handleAuthRequests，自动应答 407（用户名/密码来自 RELAY_USER / RELAY_PASS）。"""
+    import asyncio
+    import websockets as _ws
+    user, pw = os.environ.get('RELAY_USER', ''), os.environ.get('RELAY_PASS', '')
+    if not user:
+        return None
+
+    async def run():
+        n = 0
+        while True:
+            try:
+                v = json.loads(urllib.request.urlopen(
+                    CDP_LIST.replace('/json/list', '/json/version'), timeout=5).read())
+                async with _ws.connect(v['webSocketDebuggerUrl'], max_size=2_000_000, ping_interval=20) as ws:
+                    n += 1
+                    await ws.send(json.dumps({'id': n, 'method': 'Fetch.enable',
+                                              'params': {'handleAuthRequests': True, 'patterns': []}}))
+                    while True:
+                        m = json.loads(await ws.recv())
+                        if m.get('method') == 'Fetch.authRequired':
+                            n += 1
+                            await ws.send(json.dumps({'id': m['id'], 'result': {'authChallengeResponse': {
+                                'response': 'ProvideCredentials', 'username': user, 'password': pw}}}))
+                        elif m.get('method') == 'Fetch.requestPaused':
+                            n += 1
+                            await ws.send(json.dumps({'id': m['id'], 'result': {'responseState': 'ContinueRequest'}}))
+            except Exception:
+                await asyncio.sleep(1)
+
+    threading.Thread(target=lambda: asyncio.run(run()), daemon=True).start()
+    return True
+
+
 def main_srv():
     port = int(os.environ.get('DRAGD_PORT', '19222'))
     srv = ThreadingHTTPServer(('127.0.0.1', port), H)
     print(f'dragd v2 on 127.0.0.1:{port} cdp={CDP_LIST}', flush=True)
+    _auth_responder()
     srv.serve_forever()
 
 
@@ -379,7 +415,15 @@ async def drag_to3(ws, sx, sy, target_x):
     bias_px = 0.0
     err_piece = 0.0
 
-    track = generate_drag(D, bias_px=bias_px, variant="feedback")
+    _tr = os.environ.get('ZREG_TRACK_S', '').strip()      # 例: 1.4-2.0 → 每次拖动时长控制在该区间（秒）
+    _ts = None
+    if _tr:
+        try:
+            _lo, _hi = sorted(float(x) for x in _tr.split('-'))
+            _ts = random.uniform(_lo, _hi)
+        except Exception:
+            _ts = None
+    track = generate_drag(D, bias_px=bias_px, variant="feedback", total_s=_ts)
     dur_ms = sum(t[2] for t in track)
 
     # 自然接近漫游（保留我们的：真人拖前有大幅游走）

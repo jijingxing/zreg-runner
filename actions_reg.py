@@ -21,6 +21,7 @@ import re
 import shutil
 import signal
 import subprocess
+import threading
 import sys
 import time
 import urllib.error
@@ -48,6 +49,21 @@ STATE_F = f'{BASE}/actions_state{"_lane" + LANE_ID if LANE_ID else ""}.json'
 LOG_F = f'{BASE}/actions_reg.log'
 PROXY_F = os.environ.get('LANE_PROXY_FILE', f'{BASE}/proxies.json')
 PW = os.environ.get('ZREG_PW', '')            # 账号统一密码：secrets
+RELAY_PROXY = os.environ.get('RELAY_PROXY', '')          # 盒子模式：lane_relay 入口 http://host:port
+RELAY_MODE = bool(RELAY_PROXY)
+ACCT_BUDGET = float(os.environ.get('ZREG_ACCT_BUDGET', '0'))   # 单号浏览器操作时限（秒），0=不限
+LOAD_BUDGET = float(os.environ.get('ZREG_LOAD_BUDGET', '45'))  # 页面加载时限（秒）
+BG_ACT = int(os.environ.get('ZREG_BG_ACTIVATE', '0'))          # >0：后台激活线程数（走各自的 API lane）
+API_LANES = [x for x in os.environ.get('ZREG_API_LANES', '').split(',') if x]
+_DEADLINE = [None]
+_T0 = [0.0]
+_TM = [[]]
+
+
+def _mark(label):
+    """单号时间线：记录每步距开轮的秒数，随 ROUND 日志输出，用来找慢在哪。"""
+    _TM[0].append(f'{label}@{time.time() - _T0[0]:.1f}')
+_ACT_Q = [None]
 F_WALL = 6          # F0xx 连墙 N 次 → 换代理
 ERR_WALL = 3        # 基础设施错误连墙 N 次 → 重启栈（同代理）
 
@@ -84,6 +100,8 @@ def save_state(st):
 
 # ---------------------------------------------------------------- proxy pool
 def load_proxies(refresh=False):
+    if RELAY_MODE or os.environ.get('ZREG_RELAY_LANES_FILE'):
+        return [{'url': RELAY_PROXY, 'latency_ms': 0, 'ip': 'relay'}]
     age = time.time() - os.path.getmtime(PROXY_F) if os.path.exists(PROXY_F) else 1e9
     if not refresh and age < 7200:
         pl = json.load(open(PROXY_F))
@@ -148,10 +166,13 @@ def _http_ok(url, timeout=5, data=None):
 # 注意：chromium --proxy-bypass-list 用分号分隔，逗号会被当成一个主机名（实测踩坑）
 ALI_BYPASS = ('g.alicdn.com;o.alicdn.com;static-captcha.aliyuncs.com;'
               'no8xfe.captcha-open.aliyuncs.com;no8xfe-verify.captcha-open.aliyuncs.com;'
-              'upload.captcha-open.aliyuncs.com;cf.aliyun.com;sdk.rum.aliyuncs.com')
+              'upload.captcha-open.aliyuncs.com;cf.aliyun.com;sdk.rum.aliyuncs.com;'
+              'z-cdn.chatglm.cn')   # 前端静态包直连（不占出口额度，省 1-2s）
 
 
 def ensure_xvfb(xvfb_bin=None):
+    if os.environ.get('ZREG_REAL_DISPLAY'):
+        return bool(os.environ.get('DISPLAY'))      # 盒子：用户桌面 X11 会话
     """多 lane 共用一个 Xvfb：独立会话启动、不归属任何 lane（lane 重启自己的栈不会连带杀掉显示）。"""
     xvfb_bin = xvfb_bin or _which('Xvfb') or os.path.expanduser('~/x-root/usr/bin/Xvfb')
     sock = f'/tmp/.X11-unix/X{DISPLAY_NUM}'
@@ -175,7 +196,8 @@ def start_stack(proxy_url):
         raise RuntimeError(f'missing binaries: xvfb={xvfb_bin} chrome={chrome_bin}')
 
     ensure_xvfb(xvfb_bin)
-    os.environ['DISPLAY'] = f':{DISPLAY_NUM}'
+    if not os.environ.get('ZREG_REAL_DISPLAY'):
+        os.environ['DISPLAY'] = f':{DISPLAY_NUM}'     # Xvfb 模式才改；桌面模式沿用会话的 DISPLAY
 
     # persistent profile：整个 run 复用同一 profile（zreg 实证 persistent 是过 F015 的必要条件；
     # 换代理重启栈也保留——指纹/设备历史在 profile 里累积）
@@ -187,33 +209,55 @@ def start_stack(proxy_url):
             pass
     chrome_args = [chrome_bin, f'--user-data-dir={profile}', '--no-first-run',
                    f'--remote-debugging-port={CDP_PORT}', '--disable-dev-shm-usage',
-                   f'--proxy-server={proxy_url}',
+                   f'--proxy-server={proxy_url.split("://", 1)[0] + "://" + proxy_url.split("://", 1)[-1].rpartition("@")[2]}',   # Chrome 不带凭据，认证由 dragd 应答
                    f'--proxy-bypass-list={ALI_BYPASS}',
                    '--window-size=1440,900', '--window-position=0,0',
                    'about:blank']
+    if os.environ.get('ZREG_REAL_DISPLAY'):
+        for f in ('--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding',
+                  '--disable-background-timer-throttling', '--disable-features=CalculateNativeWinOcclusion'):
+            chrome_args.insert(1, f)
     for extra in os.environ.get('CHROME_EXTRA', '').split():
         chrome_args.insert(1, extra)
     _procs['chrome'] = subprocess.Popen(chrome_args, stdout=subprocess.DEVNULL,
                                         stderr=open(f'{BASE}/chrome.log', 'ab'))
 
+    # CDP 就绪：盒子上 Chrome 先把 DevTools 绑到 [::1]，127.0.0.1 要晚很久 → 两个都试，谁通用谁
+    cdp_base = None
+    dl = time.time() + 60
+    while time.time() < dl and not cdp_base:
+        for _b in (f'http://127.0.0.1:{CDP_PORT}', f'http://[::1]:{CDP_PORT}'):
+            if _http_ok(_b + '/json/version'):
+                cdp_base = _b
+                break
+        if not cdp_base:
+            time.sleep(0.5)
+    if not cdp_base:
+        log('stack start timeout: chrome CDP never came up')
+        _kill_stack()
+        return False
+
     env = dict(os.environ)
-    env['DRAGD_CDP'] = f'http://127.0.0.1:{CDP_PORT}/json/list'
+    env['DRAGD_CDP'] = cdp_base + '/json/list'
     env['DRAGD_PORT'] = str(DRAGD_PORT)
     env['PYTHONPATH'] = BASE
+    _cred = proxy_url.split('://', 1)[-1].rpartition('@')[0]
+    if ':' in _cred:
+        env['RELAY_USER'], env['RELAY_PASS'] = _cred.split(':', 1)      # 上游代理密码 → dragd 自动应答 407
     _procs['dragd'] = subprocess.Popen(
         [py, '-u', f'{BASE}/dragd2.py'], env=env, cwd=BASE,
         stdout=open(f'{BASE}/dragd.log', 'ab'), stderr=subprocess.STDOUT)
 
-    # 条件等待：chrome CDP + dragd 双就绪（单次 sleep ≤0.5s，总上限 90s）
-    dl = time.time() + 90
+    # 条件等待：dragd 就绪（单次 sleep ≤0.5s，总上限 30s）
+    dl = time.time() + 30
     while time.time() < dl:
-        cdp = _http_ok(f'http://127.0.0.1:{CDP_PORT}/json/version')
         dg = _http_ok(f'http://127.0.0.1:{DRAGD_PORT}/ping')
-        if cdp and dg:
+        if dg:
             log(f'stack up (proxy={proxy_url})')
             return True
         time.sleep(0.5)
     log('stack start timeout')
+    cdp, dg = bool(cdp_base), False
     dp = _procs.get('dragd')
     try:
         ss = subprocess.run(['ss', '-tlnp'], capture_output=True, text=True, timeout=5)
@@ -226,7 +270,7 @@ def start_stack(proxy_url):
         f'cdp_ok={cdp} dragd_ok={dg} ss={ss_lines}')
     for label, url, data in [('GET-ping', f'http://127.0.0.1:{DRAGD_PORT}/ping', None),
                              ('POST-tabs', f'http://127.0.0.1:{DRAGD_PORT}/tabs',
-                              json.dumps({'action': 'list'}))]:
+                              json.dumps({'action': 'list'}).encode())]:
         try:
             rq = urllib.request.Request(url, data=data,
                                         headers={'Content-Type': 'application/json'})
@@ -286,6 +330,8 @@ def close_stale_tabs():
 
 def wait_for(cond, timeout=8.0, interval=0.3):
     dl = time.time() + timeout
+    if _DEADLINE[0]:
+        dl = min(dl, _DEADLINE[0])
     while time.time() < dl:
         try:
             if cond():
@@ -315,6 +361,8 @@ def _wait_widget(timeout):
     """等题目真正可见：滑块把手有宽度 **且** 背景图已布局出来（宽度>50）。
     只看 naturalWidth 会把「已加载但隐藏（宽 0）」的图当成就绪（11-24 实测：(0/0) 越界 55 次/10 分钟）。"""
     dl = time.time() + timeout
+    if _DEADLINE[0]:
+        dl = min(dl, _DEADLINE[0])
     st = {}
     while time.time() < dl:
         try:
@@ -339,26 +387,57 @@ const img=document.getElementById('aliyunCaptcha-img');let p=img;for(let i=0;i<4
 return 1})()""")
     time.sleep(1.2)
 
+def _click_start_verification():
+    """新版表单：验证码是内嵌按钮「点击开始验证 / Click to start verification」，必须可信点击才出滑块。"""
+    xy = R.ev(r"""(()=>{const b=[...document.querySelectorAll('button,div,span,a,label')].find(e=>e.children.length<8&&/(click to start verification|start verification|点击开始验证|开始验证|点击验证)/i.test((e.textContent||'').trim())&&(e.textContent||'').trim().length<60);if(!b)return null;const r=b.getBoundingClientRect();return (r.width>8&&r.height>8)?[r.x+r.width/2,r.y+r.height/2]:null})()""")
+    if xy:
+        try:
+            rq = urllib.request.Request(f'http://127.0.0.1:{DRAGD_PORT}/click',
+                data=json.dumps({'x': xy[0], 'y': xy[1]}).encode(),
+                headers={'Content-Type': 'application/json'})
+            _NO_PROXY_OPENER.open(rq, timeout=30).read()
+            log('start-verification button clicked')
+            _mark('sv')
+            return True
+            _mark('sv')
+        except Exception as e:
+            log(f'start-verification click fail: {repr(e)[:50]}')
+    return False
+
 def one_round(trial):
     """一个 tab：开页+填表一次，页内连刷滑块直到 signup 成功或 widget 死。
     返回 (ok, email, verdict, err)；verdict 尽量透传最后一轮的判定码供配额/F墙分类。"""
     import random
     R.PORT = DRAGD_PORT
-    open_new_tab()
-    # 等 SPA 就绪；代理一死页面就是 chrome-error → 立刻判 PROXY-DEAD 换出口（不再干等 45s）
-    _dl = time.time() + 45
-    _st = 'wait'
-    while time.time() < _dl:
-        try:
-            _st = R.ev("""location.href.indexOf("chrome-error")==0?"err":(document.readyState==="complete"&&(document.querySelector("form input")||[...document.querySelectorAll("a,button")].some(b=>/Continue with Email/i.test(b.textContent||""))))?"ok":"wait")""")
-        except Exception:
-            _st = 'wait'
-        if _st in ('ok', 'err'):
+    _DEADLINE[0] = (time.time() + ACCT_BUDGET) if ACCT_BUDGET else None
+    _T0[0] = time.time()
+    _TM[0] = []
+    # 加载：隧道错误（chrome-error）→ 判坏出口并秒换下一个重试，最多 3 次；总预算由 _DEADLINE 约束
+    _tries = 3 if RELAY_MODE else 1
+    for _try in range(_tries):
+        if RELAY_MODE:
+            _relay_ctl('/_next')        # 秒级换出口：掐断旧连接，本号的 CONNECT 走新上游
+        open_new_tab()
+        _dl = min(time.time() + LOAD_BUDGET, _DEADLINE[0] or 1e18)
+        _st = 'wait'
+        while time.time() < _dl:
+            try:
+                _st = R.ev("""location.href.indexOf("chrome-error")==0?"err":(document.readyState==="complete"&&(document.querySelector("form input")||[...document.querySelectorAll("a,button")].some(b=>/Continue with Email/i.test(b.textContent||""))))?"ok":"wait")""")
+            except Exception:
+                _st = 'wait'
+            if _st in ('ok', 'err'):
+                break
+            time.sleep(0.5)
+        if _st != 'err' and R.ev('location.href.indexOf("chrome-error")==0'):
+            _st = 'err'
+        if _st != 'err':
             break
-        time.sleep(0.5)
-    if _st == 'err':
-        log(_page_ctx('PROXY-DEAD'))
+        log(f'exit dead on load (try {_try + 1}/{_tries}): ' + _page_ctx('PROXY-DEAD'))
+        if RELAY_MODE:
+            _relay_ctl('/_bad')
+    else:
         return False, '-', 'PROXY-DEAD', None
+    _mark('load')
     wait_for(lambda: R.ev(
         'document.readyState==="complete" && '
         '(!!document.querySelector("form input") || '
@@ -376,8 +455,9 @@ def one_round(trial):
     R.ev("""(()=>{const b=[...document.querySelectorAll("a,button")].find(b=>/Continue with Email|继续使用邮箱/i.test(b.textContent||''));if(b){b.click();return 1}return 0})()""")
     wait_for(lambda: R.ev('!!document.querySelector("form input")', 6) is True, 15, 0.5)
     # 登录↔注册切换（CN“注册” / intl "Sign up"，避开 Google/Github）
-    R.ev("""(()=>{const b=[...document.querySelectorAll("a,button")].find(b=>{const t=(b.textContent||'').trim();return /(sign\s*up|注册)/i.test(t)&&!/google|github|apple|wechat/i.test(t)});if(b){b.click();return 1}return 0})()""")
+    R.ev(r"""(()=>{const b=[...document.querySelectorAll("a,button")].find(b=>{const t=(b.textContent||'').trim();return /(sign\s*up|注册)/i.test(t)&&!/google|github|apple|wechat/i.test(t)});if(b){b.click();return 1}return 0})()""")
     wait_for(lambda: R.ev('!!document.querySelector("form input[name=new-password], form input[type=password]")', 6) is True, 10, 0.3)
+    _mark('form')
     email = R.open_challenge()
     # 密码框必须回读校验：React 重渲染可能换掉节点（11-24 实测填完即丢），最多重填 4 次
     _pw_ok = False
@@ -390,25 +470,20 @@ def one_round(trial):
         time.sleep(0.6)
     if not _pw_ok:
         log('WARN password not filled after retries: pwlen=%s %s' % (_pwlen, R.ev("""(()=>{try{const ins=[...document.querySelectorAll('input')].map(e=>[e.name||'-',e.type||'-',e.autocomplete||'-',(e.placeholder||'').slice(0,20),(e.value||'').length,e.closest('form')?'in':'out'].join('|'));return JSON.stringify({inputs:ins,href:location.href})}catch(e){return 'js-err '+String(e).slice(0,80)}})()""")))
-    # 新版表单（11-24 出现）：验证码是内嵌按钮「Click to start verification」，必须可信点击才出滑块
-    xy = R.ev("""(()=>{const b=[...document.querySelectorAll('button,div,span,a,label')].find(e=>e.children.length<5&&/^\\s*(click to start verification|start verification|点击开始验证|开始验证|点击验证)/i.test((e.textContent||'').trim())&&(e.textContent||'').trim().length<40);if(!b)return null;const r=b.getBoundingClientRect();return (r.width>8&&r.height>8)?[r.x+r.width/2,r.y+r.height/2]:null})()""")
-    if xy:
-        try:
-            rq = urllib.request.Request(f'http://127.0.0.1:{DRAGD_PORT}/click',
-                data=json.dumps({'x': xy[0], 'y': xy[1]}).encode(),
-                headers={'Content-Type': 'application/json'})
-            _NO_PROXY_OPENER.open(rq, timeout=30).read()
-            log('start-verification button clicked')
-        except Exception as e:
-            log(f'start-verification click fail: {repr(e)[:50]}')
+    _mark('fill')
+    _click_start_verification()
     # fetch 钩子装一次，整个 tab 生命周期有效
-    R.ev("""(()=>{window.__signup=null;const of=window.fetch;window.fetch=async function(...a){const u=String(a[0]||"");const r=await of.apply(this,a);try{if(/auths\/signup/.test(u)){const c=await r.clone().text();window.__signup={st:r.status,body:c.slice(0,200)}}}catch(e){};return r};return 1})()""")
+    R.ev(r"""(()=>{window.__signup=null;const of=window.fetch;window.fetch=async function(...a){const u=String(a[0]||"");const r=await of.apply(this,a);try{if(/auths\/signup/.test(u)){const c=await r.clone().text();window.__signup={st:r.status,body:c.slice(0,200)}}}catch(e){};return r};return 1})()""")
 
     last_v, last_err = 'NO-WIDGET', None
     ntype = 0
     for att in range(IN_TAB_MAX):
+        if _expired():
+            log(f'account budget {ACCT_BUDGET:.0f}s hit (att {att})')
+            return False, email, last_v if att else 'TIMEOUT-BUDGET', last_err
         st = _wait_widget(20 if att == 0 else 12)
         if not _widget_ready(st):
+            _click_start_verification()      # 验证码条可能比表单晚渲染：每轮等待都再点一次
             _force_show_captcha()
             st = _wait_widget(8)
         if not _widget_ready(st):
@@ -417,6 +492,9 @@ def one_round(trial):
         if not _widget_ready(st):
             if att == 0:
                 log(_page_ctx('NO-WIDGET'))
+                if _expired():
+                    _dbg_push(st, tag='budget')
+                    return False, email, 'TIMEOUT-BUDGET', None
                 _dbg_push(st, tag='nowidget')
                 return False, email, 'NO-WIDGET', None
             log(f'widget dead after {att} attempts')
@@ -433,11 +511,13 @@ def one_round(trial):
             R.ev("""(()=>{const b=document.querySelector('#aliyunCaptcha-btn-refresh')||document.querySelector('#aliyunCaptcha-captcha-body button');if(b)b.click();return 1})()""")
             time.sleep(2.5 + random.random() * 1.5)
             continue
+        _mark('widget')
         try:
             hx, x0 = R.hole(st)
         except Exception as e:
             _dbg_push(st)
             return False, email, f'HOLE-ERR {repr(e)[:40]}', None
+        _ox = st.get('ox') or 0
         target = st['bg']['x'] + (hx - x0) * (st['bg']['w'] / st['bg']['nw'])
         off = target - st['bg']['x']
         if not (6 <= off <= st['bg']['w'] - 6):
@@ -464,7 +544,8 @@ def one_round(trial):
                     st2 = _wait_widget(8)
                     if st2.get('slider') and st2.get('bg'):
                         st = st2
-                        target = st['bg']['x'] + (hx - x0) * (st['bg']['w'] / st['bg']['nw'])
+                        _ox = st.get('ox') or 0
+        target = st['bg']['x'] + (hx - x0) * (st['bg']['w'] / st['bg']['nw'])
                     continue
                 return False, email, f'DRAG-ERR {repr(e)[:40]}', None
             except Exception as e:
@@ -474,6 +555,7 @@ def one_round(trial):
             continue
         v = r.get('verdict')
         last_v, last_err = v or 'NO-VERDICT', r.get('final_err')
+        _mark(f'drag:{v}')
         if v not in ('T001', None):
             # F0xx 等：SDK 自动换题，小抖动后继续（不出页面）
             time.sleep(1.5 + random.random() * 2.5)
@@ -487,7 +569,7 @@ def one_round(trial):
                 ver_ok = True
                 break
             time.sleep(0.25)
-        R.ev("""(()=>{const b=[...document.querySelectorAll("form button")].find(b=>/创建账号|create account|sign\s*up/i.test(b.textContent||''));if(b)b.click();return 1})()""")
+        R.ev(r"""(()=>{const b=[...document.querySelectorAll("form button")].find(b=>/创建账号|create account|sign\s*up/i.test(b.textContent||''));if(b)b.click();return 1})()""")
         s = 'null'
         for _ in range(20):
             s = R.ev('JSON.stringify(window.__signup||null)')
@@ -498,6 +580,7 @@ def one_round(trial):
             sd = json.loads(s)
             ok = sd.get('st') == 200 and 'success":true' in (sd.get('body') or '')
             if ok:
+                _mark('signup-ok')
                 return True, email, 'T001-SIGNUP200', r.get('final_err')
             last_v = f'SIGNUP-{s[:50]}'
         except Exception:
@@ -508,13 +591,12 @@ def one_round(trial):
 
 
 # ---------------------------------------------------------------- activation
-def activate(email, pw, proxy_url, alt_proxies=None):
+def activate(email, pw, proxy_url, alt_proxies=None, rotate_hook=None):
     """内联激活：CloudMail 找 token → verify/finish/oauth（全部走当前代理）。
     返回 (state_dict|None, reason)。"""
     from zreg_min.mailbox import CloudMail
     from zreg_min import http_box
-    os.environ['ZREG_HTTP_PROXY_URL'] = proxy_url
-    http_box._OP = None  # 换代理后重建 opener
+    http_box.set_thread_proxy(proxy_url)  # 换代理后重建 opener
 
     name = email.split('@')[0]
     m = CloudMail()
@@ -577,8 +659,9 @@ def activate(email, pw, proxy_url, alt_proxies=None):
     chat_jwt = None
     for ei, ex in enumerate(exits):
         if ei:
-            os.environ['ZREG_HTTP_PROXY_URL'] = ex
-            http_box._OP = None
+            http_box.set_thread_proxy(ex)
+            if rotate_hook:
+                rotate_hook()
             log(f'  {name}: finish-429 on this exit → retry via {ex}')
         for attempt in range(2 if ei == 0 else 1):
             s2, r2, _ = hj('POST', 'https://chat.z.ai/api/v1/auths/finish_signup',
@@ -704,8 +787,7 @@ def claim_plan(jwt, mid, proxy_url, max_drag=14, alt_proxies=None):
     exits = [proxy_url] + [p for p in (alt_proxies or []) if p != proxy_url][:5]
     last = None
     for ex in exits:
-        os.environ['ZREG_HTTP_PROXY_URL'] = ex
-        http_box._OP = None
+        http_box.set_thread_proxy(ex)
         a, hs = None, 0
         for _ in range(2):
             a, hs = plan_active(jwt, mid)
@@ -772,7 +854,7 @@ def _dbg_push(st, hx=None, x0=None, tag='hole'):
 def _claim_diag():
     """滑块不出时的页面现场：aliyun DOM 节点及尺寸/显隐、__inst、refresh() 结果、资源加载明细。"""
     try:
-        return R.ev("""(()=>{const q=[...document.querySelectorAll('[id^="aliyunCaptcha"]')];
+        return R.ev(r"""(()=>{const q=[...document.querySelectorAll('[id^="aliyunCaptcha"]')];
 const ids=q.slice(0,8).map(e=>{const r=e.getBoundingClientRect();return e.id.slice(14,30)+':'+Math.round(r.width)+'x'+Math.round(r.height)+':'+getComputedStyle(e).display});
 const res=performance.getEntriesByType('resource').map(e=>e.name.replace(/^https?:\/\//,'').slice(0,44)+'#'+(e.responseStatus||'?')+'/'+Math.round(e.duration));
 let rf='';try{if(window.__inst){window.__inst.refresh();rf='refresh-ok'}else{rf='no-inst'}}catch(e){rf='refresh-err:'+String(e&&e.message||e).slice(0,40)}
@@ -821,7 +903,8 @@ def _claim_plan_on_exit(jwt, mid, proxy_url, max_drag):
                 hx, x0 = R.hole(st)
             except Exception as e:
                 return False, f'HOLE-ERR {repr(e)[:40]}'
-            target = st['bg']['x'] + (hx - x0) * (st['bg']['w'] / st['bg']['nw'])
+            _ox = st.get('ox') or 0
+        target = st['bg']['x'] + (hx - x0) * (st['bg']['w'] / st['bg']['nw'])
             rq = urllib.request.Request(f'http://127.0.0.1:{DRAGD_PORT}/dragto3',
                 data=json.dumps({'sx': st['slider']['x'] + 20, 'sy': st['slider']['y'] + 20,
                                  'target_x': round(target, 1)}).encode(),
@@ -882,6 +965,63 @@ def push_collector(kind, name, data):
 
 
 # ---------------------------------------------------------------- main
+def _relay_ctl(path, url=None, timeout=8):
+    """lane_relay 控制面：/_next /_bad /_cur /_health → dict（失败返回 {}）。"""
+    import base64
+    import socket as _socket
+    u = (url or RELAY_PROXY).split('://', 1)[-1].rstrip('/')
+    cred, _, hp = u.rpartition('@')
+    host, _, port = hp.rpartition(':')
+    try:
+        s = _socket.create_connection((host, int(port)), timeout=timeout)
+        auth = base64.b64encode(cred.encode()).decode() if cred else ''
+        req = 'GET ' + path + ' HTTP/1.1\r\nHost: relay\r\nProxy-Authorization: Basic ' + auth + '\r\nConnection: close\r\n\r\n'
+        s.sendall(req.encode())
+        data = b''
+        while True:
+            d = s.recv(4096)
+            if not d:
+                break
+            data += d
+        s.close()
+        return json.loads(data.decode(errors='replace').split('\r\n\r\n', 1)[-1] or '{}')
+    except Exception as e:
+        log(f'relay {path} fail: {repr(e)[:50]}')
+        return {}
+
+
+def _expired():
+    return bool(_DEADLINE[0] and time.time() > _DEADLINE[0])
+
+
+def _activate_worker(q, lane_url):
+    """后台激活：verify → finish（429 换出口）→ oauth；落盘 + 推 collector。浏览器 lane 不等它。"""
+    from zreg_min import http_box as _hb
+    while True:
+        email = q.get()
+        if email is None:
+            return
+        try:
+            state, why = activate(email, PW, lane_url, [lane_url] * 4,
+                                  rotate_hook=lambda: _relay_ctl('/_next', lane_url))
+            if state:
+                os.makedirs(f'{BASE}/zreg_state_out', exist_ok=True)
+                os.makedirs(f'{BASE}/cred_out', exist_ok=True)
+                nm = email.split('@')[0]
+                json.dump(state, open(f'{BASE}/zreg_state_out/{nm}.json', 'w'), ensure_ascii=False, indent=2)
+                push_collector('zreg', nm, state)
+                if state.get('credential'):
+                    json.dump(state['credential'], open(f'{BASE}/cred_out/{nm}.json', 'w'))
+                    push_collector('cred', nm, state['credential'])
+                log(f'  {nm}: {"FINISHED, oauth pending" if state.get("oauth_pending") else "ACTIVATED ✓"} (bg)')
+            else:
+                log(f'  {email}: activation pending ({why}) (bg)')
+        except Exception as e:
+            log(f'  {email}: bg activate exc {repr(e)[:60]}')
+        finally:
+            _hb.set_thread_proxy('')
+
+
 def _heartbeat(name):
     """每 45s 把共享日志尾巴推给 collector（kind=log），长跑时 VPS 侧可实时看，不必等 job 结束。"""
     import threading
@@ -902,7 +1042,17 @@ def spawn_lanes(n, target, rounds_max):
     if not proxies:
         log('no proxies available, exit')
         sys.exit(1)
-    log(f'lanes={n} target={target} proxies={len(proxies)}')
+    lanes_map = None
+    if os.environ.get('ZREG_RELAY_LANES_FILE'):
+        # 盒子模式：lane_relay 每个端口一条 lane（本地回环免鉴权）。浏览器 lane 用 0..n-1，
+        # 后台激活的 API lane 从顶端往下分配，互不干扰。
+        import json as _json
+        lf = os.environ.get('ZREG_RELAY_LANES_FILE', '')
+        lanes_map = _json.load(open(lf)) if lf and os.path.exists(lf) else {}
+        total = len(lanes_map)
+        log(f'lanes={n} target={target} relay lanes total={total} host={os.environ.get("ZREG_RELAY_HOST", "127.0.0.1")}')
+    else:
+        log(f'lanes={n} target={target} proxies={len(proxies)}')
     ensure_xvfb()                          # 父进程先起公共 Xvfb
     hb = os.environ.get('HB_NAME')
     if hb and COLLECTOR_URL:
@@ -918,7 +1068,21 @@ def spawn_lanes(n, target, rounds_max):
         env['LANE_ID'] = str(k)
         env['CDP_PORT'] = str(9340 + k)
         env['DRAGD_PORT'] = str(19440 + k)
-        env['ZREG_PROFILE_DIR'] = f"/tmp/zreg-lane{k}-{os.getpid()}"
+        if lanes_map is not None:
+            host = os.environ.get('ZREG_RELAY_HOST', '127.0.0.1')
+            b = lanes_map.get(str(k))
+            api = lanes_map.get(str(total - 1 - k))
+
+            def _lane_url(e):
+                if not e:
+                    return ''
+                c = f"{e['user']}:{e['pass']}@" if e.get('user') else ''
+                return f"http://{c}{host}:{e['port']}"
+            env['RELAY_PROXY'] = _lane_url(b) or RELAY_PROXY
+            env['ZREG_API_LANES'] = _lane_url(api) if api is not b else ''
+            shm = '/dev/shm'
+            env['ZREG_PROFILE_DIR'] = (f"{shm}/zreg-lane{k}-{os.getpid()}" if os.path.isdir(shm) and os.access(shm, os.W_OK)
+                                       else f"/tmp/zreg-lane{k}-{os.getpid()}")
         env['LANE_PROXY_FILE'] = lane_f
         cmd = [sys.executable, '-u', os.path.abspath(__file__),
                '--target', str(per[k]), '--rounds-max', str(rm[k] or 10**9)]
@@ -944,9 +1108,15 @@ def main():
         log(f'missing required secrets/env: {missing}')
         sys.exit(2)
 
-    if args.lanes > 1 and not LANE_ID:
-        rc = spawn_lanes(args.lanes, TARGET, args.rounds_max)
+    if (args.lanes > 1 or os.environ.get('ZREG_RELAY_LANES_FILE')) and not RELAY_MODE and not LANE_ID:
+        rc = spawn_lanes(max(1, args.lanes), TARGET, args.rounds_max)
         sys.exit(rc)
+    if BG_ACT and API_LANES:
+        import queue as _queue
+        _ACT_Q[0] = _queue.Queue()
+        for _u in API_LANES[:BG_ACT]:
+            threading.Thread(target=_activate_worker, args=(_ACT_Q[0], _u), daemon=True).start()
+        log(f'bg activation workers: {min(BG_ACT, len(API_LANES))} via {API_LANES[:BG_ACT]}')
 
     st = load_state()
     proxies = load_proxies(refresh=False)
@@ -984,7 +1154,13 @@ def main():
                                     'verdict': verdict, 'err': err}) + '\n')
             push_collector('acct', email.split('@')[0],
                            {'email': email, 'pw': PW, 'verdict': verdict})
-            log(f'ROUND {st["rounds"]}: #{st["ok"]}/{TARGET} {email} err={err}')
+            log(f'ROUND {st["rounds"]}: #{st["ok"]}/{TARGET} {email} err={err} tl=[{" ".join(_TM[0])}]')
+            # 内联激活（同代理）
+            if BG_ACT and _ACT_Q[0] is not None:
+                _ACT_Q[0].put(email)      # 后台线程激活，浏览器 lane 立刻做下一个号
+                time.sleep(0.2)
+                save_state(st)
+                continue
             # 内联激活（同代理）
             state, why = activate(email, PW, proxies[idx]['url'],
                                    [p['url'] for p in proxies if p['url'] != proxies[idx]['url']])
@@ -1013,7 +1189,7 @@ def main():
                 st.setdefault('pending_act', []).append(email)
                 log(f'  {email}: activation pending ({why})')
         else:
-            log(f'ROUND {st["rounds"]}: fail {verdict} err={err} ({st["ok"]}/{TARGET})')
+            log(f'ROUND {st["rounds"]}: fail {verdict} err={err} ({st["ok"]}/{TARGET}) tl=[{" ".join(_TM[0])}]')
             v = str(verdict)
             quota = ('SIGNUP-{"st":405' in v or 'SIGNUP-{"st":429' in v)
             if v.startswith('F0'):
@@ -1047,6 +1223,12 @@ def main():
                 st['nw_streak'] = 0
                 st['err_streak'] = 0
                 st['signups_this_proxy'] = 0
+                if RELAY_MODE:
+                    if v in ('PAGE-BLANK', 'PROXY-DEAD', 'NO-WIDGET') or v.startswith(('EXC', 'DRAG-ERR', 'TIMEOUT')):
+                        _relay_ctl('/_bad')
+                    save_state(st)
+                    time.sleep(0.2)
+                    continue              # 栈不动，下一轮开头的 /_next 换出口
                 start_stack(proxies[idx]['url'])
             elif st['err_streak'] >= ERR_WALL:
                 log('err streak → restart stack')
@@ -1060,6 +1242,11 @@ def main():
     log(f'=== done: {st["ok"]}/{TARGET} (pending_act={len(st.get("pending_act", []))}) ===')
     save_state(st)
     _kill_stack()
+    if _ACT_Q[0] is not None:                 # 等后台激活排空（最多 4 分钟）
+        _t0 = time.time()
+        while not _ACT_Q[0].empty() and time.time() - _t0 < 240:
+            time.sleep(2)
+        log('bg activation queue drained' if _ACT_Q[0].empty() else 'bg activation queue not empty, exiting')
 
 
 if __name__ == '__main__':

@@ -18,6 +18,10 @@ SOURCES = [
     "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/http.txt",
     "https://raw.githubusercontent.com/roosterkid/openproxylist/main/HTTPS_RAW.txt",
     "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/all/data.txt",
+    "https://api.proxyscrape.com/v2/?request=getproxies&protocol=http&timeout=10000&country=all&ssl=all&anonymity=all",
+    "https://raw.githubusercontent.com/officialputuid/KangProxy/KangProxy/http/http.txt",
+    "https://raw.githubusercontent.com/officialputuid/KangProxy/KangProxy/https/https.txt",
+    "https://raw.githubusercontent.com/sunny9577/proxy-scraper/master/generated/http_proxies.txt",
 ]
 # clarketm 格式: ip:port 后面带元数据
 PAT = re.compile(r"(\d{1,3}(?:\.\d{1,3}){3}:\d{2,5})")

@@ -24,10 +24,18 @@ def ev(expr, timeout=25):
 
 
 def state():
-    return json.loads(ev("""(()=>JSON.stringify({
-      slider:(s=>s&&s.getBoundingClientRect().width>5?{x:s.getBoundingClientRect().x,y:s.getBoundingClientRect().y,w:s.getBoundingClientRect().width}:null)(document.querySelector('#aliyunCaptcha-sliding-slider')),
-      bg:(b=>b&&b.naturalWidth>50?{x:b.getBoundingClientRect().x,w:b.getBoundingClientRect().width,nw:b.naturalWidth,src:b.src}:null)(document.querySelector('#aliyunCaptcha-img'))
-    }))()"""))
+    """CN 站新版：验证码渲染在 window-popup 里，bg 可能是 <canvas>（不是 <img>）。
+    从『aliyunCaptcha-window-popup / window-embed』任一存在处查找 slider+bg，并回传窗口偏移。"""
+    return json.loads(ev(r"""(()=>{const doc=document;const pick=t=>doc.querySelector(t);
+const popup=pick('#aliyunCaptcha-window-popup');
+const sl=pick('#aliyunCaptcha-sliding-slider');
+const img=pick('#aliyunCaptcha-img')||pick('#aliyunCaptcha-canvas'); // canvas 变体
+const bgEl=(img&&img.naturalWidth>50)?img:null;
+const sr=sl?sl.getBoundingClientRect():null;
+const br=bgEl?bgEl.getBoundingClientRect():null;
+if(!sr||!br)return JSON.stringify({slider:null,bg:null});
+const ox=popup?popup.getBoundingClientRect().x:0; // popup 窗口的屏幕偏移
+return JSON.stringify({slider:{x:sr.x,y:sr.y,w:sr.width},bg:{x:br.x,w:br.width,nw:bgEl.naturalWidth,src:bgEl.src||('canvas:'+bgEl.id)},ox:ox})})()"""))
 
 
 def hole(st):
@@ -36,7 +44,14 @@ def hole(st):
     op = urllib.request.build_opener()
     op.addheaders = [('User-Agent', 'Mozilla/5.0'), ('Referer', 'https://chat.z.ai/')]
     bgu = st['bg']['src']
-    if bgu.startswith('data:'):
+    if bgu.startswith('canvas:'):
+        # canvas 变体：直接从页面导出像素（截图兼性能更好）
+        d = ev("""(()=>{const e=document.querySelector('#aliyunCaptcha-img')||document.querySelector('#aliyunCaptcha-canvas');return e?e.toDataURL('image/png'):''})()""")
+        import base64 as _b64
+        bg = Image.open(io.BytesIO(_b64.b64decode(d.split(',', 1)[1]))) if d else None
+        if bg is None:
+            raise ValueError('no captcha canvas/image found')
+    elif bgu.startswith('data:'):
         import base64 as _b64
         bg = Image.open(io.BytesIO(_b64.b64decode(bgu.split(',', 1)[1])))
     else:
